@@ -174,10 +174,10 @@ ${JSON.stringify(segments)}
 
 Return as JSON array maintaining the exact same order.`;
 
-    console.log(`🚀 OpenAI API 호출 시작 (모델: deepseek-chat)`);
+    console.log(`🚀 OpenAI API 호출 시작 (모델: gpt-3.5-turbo)`);
     
     const response = await openai.chat.completions.create({
-      model: 'deepseek-chat',
+      model: 'gpt-3.5-turbo',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
@@ -186,10 +186,10 @@ Return as JSON array maintaining the exact same order.`;
       max_tokens: 4000
     });
 
-    console.log(`✅ Deepseek API 응답 받음`);
+    console.log(`✅ OpenAI API 응답 받음`);
     
     const content = response.choices[0]?.message?.content || '[]';
-    console.log(`📄 Deepseek 응답 내용 (처음 200자): "${content.substring(0, 200)}..."`);
+    console.log(`📄 OpenAI 응답 내용 (처음 200자): "${content.substring(0, 200)}..."`);
     
     try {
       const batchResults = JSON.parse(content);
@@ -233,7 +233,7 @@ Return as JSON array maintaining the exact same order.`;
       };
     }
   } catch (apiError) {
-    console.error('❌ Deepseek API 호출 실패:', apiError);
+    console.error('❌ OpenAI API 호출 실패:', apiError);
     
     // API 호출 실패시 폴백 처리
     return {
