@@ -33,7 +33,6 @@ function getOpenAIClient() {
 exports.translateSegments = onCall({
   timeoutSeconds: 300,
   memory: "1GiB",
-  region: "asia-southeast1", // 싱가포르 리전으로 변경
   secrets: ["DEEPSEEK_API_KEY"]  // secret 사용 선언
 }, async (request) => {
   if (!request.auth) {
@@ -104,8 +103,8 @@ async function batchTranslateSegments(
     return {units: [], fullOriginalText: "", fullTranslatedText: ""};
   }
 
-  // 청크 크기를 8로 감소 (더 빠른 응답을 위해)
-  const CHUNK_SIZE = 8;
+  // 세그먼트가 많으면 청크로 나누어 처리 (API 제한 고려)
+  const CHUNK_SIZE = 10;
   const chunks = [];
 
   for (let i = 0; i < segments.length; i += CHUNK_SIZE) {
@@ -120,28 +119,29 @@ async function batchTranslateSegments(
   let fullOriginalText = "";
   let fullTranslatedText = "";
 
-  // 병렬 처리를 순차 처리로 변경 (안정성 우선)
+  // 청크별로 처리
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
-    
     console.log(`🔄 Processing chunk ${i + 1}/${chunks.length}`);
-    
+
     try {
-      const chunkResult = await translateChunk(chunk, targetLanguage, needPinyin);
-      
+      const chunkResult = await translateChunk(
+          chunk, targetLanguage, needPinyin,
+      );
+
       allUnits.push(...chunkResult.units);
       fullOriginalText += chunkResult.fullOriginalText;
       fullTranslatedText += chunkResult.fullTranslatedText;
-      
-      // 각 청크 간 지연 시간 증가 (API 안정성 향상)
+
+      // API 레이트 리밋을 위한 지연
       if (i < chunks.length - 1) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await new Promise((resolve) => setTimeout(resolve, 500));
       }
-      
     } catch (error) {
       console.error(`❌ Chunk ${i + 1} failed:`, error);
+
       // 실패한 청크는 원본만 유지
-      chunk.forEach(segment => {
+      chunk.forEach((segment) => {
         allUnits.push({
           originalText: segment,
           translatedText: "",
@@ -209,9 +209,7 @@ Return as JSON array maintaining the exact same order.`;
         {role: "user", content: userPrompt},
       ],
       temperature: 0.1,
-      max_tokens: 3000,
-      stream: false,
-      timeout: 120000, // 2분 타임아웃 추가
+      max_tokens: 4000,
     });
 
     console.log(`✅ Deepseek API 응답 받음`);
@@ -325,20 +323,16 @@ async function updatePageWithTranslation(pageId, translationResult) {
 // ===========================================
 // 상태 확인용 함수
 // ===========================================
-exports.checkTranslationHealth = onRequest({
-  region: "asia-southeast1" // 싱가포르 리전으로 변경
-}, (req, res) => {
+exports.checkTranslationHealth = onRequest((req, res) => {
   res.json({
     service: "translation-only",
     status: "healthy",
     timestamp: new Date().toISOString(),
     version: "2.0.0",
-    region: "asia-southeast1", // 리전 정보 업데이트
     capabilities: {
       batchTranslation: true,
       pinyinSupport: true,
       firestoreIntegration: true,
-      parallelProcessing: true, // 병렬 처리 추가됨
     },
   });
 });
@@ -346,10 +340,8 @@ exports.checkTranslationHealth = onRequest({
 // ===========================================
 // 테스트용 간단한 함수
 // ===========================================
-exports.helloWorld = onRequest({
-  region: "asia-southeast1" // 싱가포르 리전으로 변경
-}, (request, response) => {
+exports.helloWorld = onRequest((request, response) => {
   response.send(
-      "Hello from Firebase Functions v2! Translation service is ready from Singapore region.",
+      "Hello from Firebase Functions v2! Translation service is ready.",
   );
 });
