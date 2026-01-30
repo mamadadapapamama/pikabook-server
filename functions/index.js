@@ -13,10 +13,10 @@ initializeApp();
  * Gemini 클라이언트 생성 함수
  */
 function getGeminiClient() {
-  const apiKey = process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
-    throw new Error("API key not configured");
+    throw new Error("GEMINI_API_KEY not configured");
   }
 
   return new GoogleGenerativeAI(apiKey);
@@ -43,7 +43,7 @@ exports.translateSegmentsStream = onRequest({
   timeoutSeconds: 300,
   memory: "1GiB",
   region: "asia-southeast1",
-  secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY"],
+  secrets: ["GEMINI_API_KEY"],
 }, async (req, res) => {
   // CORS 설정
   res.set("Access-Control-Allow-Origin", "*");
@@ -165,7 +165,7 @@ exports.translateSegments = onCall({
   timeoutSeconds: 300,
   memory: "1GiB",
   region: "asia-southeast1",
-  secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY"],
+  secrets: ["GEMINI_API_KEY"],
 }, async (request) => {
   if (!request.auth) {
     throw new HttpsError("unauthenticated", "로그인 필요");
