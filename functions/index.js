@@ -39,7 +39,7 @@ async function fetchImageAsBase64(url) {
 // ===========================================
 // HTTP 스트리밍 번역 함수 (실시간 처리)
 // ===========================================
-exports.translateSegmentsStream = onRequest({
+exports.translateSegmentsStreamV2 = onRequest({
   timeoutSeconds: 300,
   memory: "1GiB",
   region: "asia-southeast1",
@@ -161,7 +161,7 @@ exports.translateSegmentsStream = onRequest({
 // ===========================================
 // 텍스트 세그먼트 번역 함수 (Text-Only 전용)
 // ===========================================
-exports.translateSegments = onCall({
+exports.translateSegmentsV2 = onCall({
   timeoutSeconds: 300,
   memory: "1GiB",
   region: "asia-southeast1",
