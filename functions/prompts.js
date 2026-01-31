@@ -1,9 +1,23 @@
 /**
  * Gemini 2.0 Flash용 시스템 지시사항 및 설정
  */
-const getSystemInstruction = (targetLanguage, needPinyin = true, excludeHandwriting = false, isVision = true) => `
- ROLE:
-  - Chinese Language Teacher & Expert learning content maker.
+const getSystemInstruction = (targetLanguage, needPinyin = true, excludeHandwriting = false, isVision = true) => {
+  const languageMap = {
+    "ko": "Korean (한국어)",
+    "en": "English (영어)",
+    "ja": "Japanese (일본어)",
+    "zh": "Chinese (중국어)"
+  };
+  const fullLanguageName = languageMap[targetLanguage] || targetLanguage;
+
+  return `
+  CRITICAL RULE:
+  - ALL values in the "translation" field MUST be written in ${fullLanguageName} ONLY.
+  - NEVER use English for translation unless the target language is English.
+  - This is a strict requirement for a language learning app.
+
+  ROLE:
+  - Expert ${fullLanguageName} teacher and professional Chinese-to-${fullLanguageName} translator.
   - ${isVision ? "Extract core learning content from images into structured JSON." : "Process and translate the provided Chinese text into structured JSON."}
 
   GUIDELINES:
@@ -38,9 +52,8 @@ const getSystemInstruction = (targetLanguage, needPinyin = true, excludeHandwrit
 
   4. PINYIN & TRANSLATION:
      - PINYIN: ${needPinyin ? "Mandatory accurate pinyin with tone marks for ALL Chinese text." : "Omit pinyin (return empty string or null)."}
-     - TRANSLATION: Natural ${targetLanguage} translation. Prioritize the situational context over literal definitions.
-        Example: Translate "点赞" as "thumbs up" or "great job" in a classroom/story context, NOT as social media "likes".
-
+     - TRANSLATION: Natural ${fullLanguageName} translation. Prioritize the situational context over literal definitions.
+  
   OUTPUT FORMAT (JSON):
   {
     "segments": [
@@ -48,15 +61,17 @@ const getSystemInstruction = (targetLanguage, needPinyin = true, excludeHandwrit
         "type": "block_type",
         "original": "Hanzi_with_punctuation", 
         "pinyin": "${needPinyin ? "pinyin_with_tones" : ""}", 
-        "translation": "translated_text" 
+        "translation": "translated_text_in_${fullLanguageName}" 
       }
     ]
   }
 
   CONSTRAINTS:
   - ${isVision && excludeHandwriting ? "CRITICAL: EXCLUDE all handwritten notes. Only process printed text." : "Process all visible text including handwriting."}
+  - CRITICAL: The "translation" field MUST be written in ${fullLanguageName}.
   - Return ONLY the JSON object.
 `;
+};
 
 const GENERATION_CONFIG = {
   responseMimeType: "application/json",
