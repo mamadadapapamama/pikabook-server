@@ -46,7 +46,32 @@ exports.translateSegmentsStream = onRequest({
     return;
   }
 
-  // 스트리밍 헤더 설정
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const textSegments = Array.isArray(body.textSegments) ? body.textSegments : [];
+  const pageSegments = Array.isArray(body.pageSegments) ? body.pageSegments : [];
+  const targetLanguage = body.targetLanguage ?? "ko";
+  const needPinyin = body.needPinyin !== false;
+  const processingMode = body.processingMode;
+
+  console.log(
+      "📥 [클라이언트 데이터 수신] textSegments: %d개, pageSegments: %d개, targetLanguage: %s, processingMode: %s, needPinyin: %s",
+      textSegments.length,
+      pageSegments.length,
+      targetLanguage,
+      processingMode ?? "(없음)",
+      needPinyin,
+  );
+  if (pageSegments.length > 0) {
+    const pageSummary = pageSegments.map((p, i) => `${p.pageId ?? i}(세그먼트 ${(p.segments || []).length}개)`).join(", ");
+    console.log(`📥 [클라이언트 데이터 수신] 페이지 요약: ${pageSummary}`);
+  }
+
+  if (textSegments.length === 0 && pageSegments.length === 0) {
+    res.status(400).json({ error: "No data provided" });
+    return;
+  }
+
+  // 스트리밍 헤더 설정 (검증 통과 후에만 200 전송)
   res.writeHead(200, {
     "Content-Type": "text/plain",
     "Cache-Control": "no-cache",
@@ -55,17 +80,9 @@ exports.translateSegmentsStream = onRequest({
   });
 
   try {
-    const {
-      textSegments,
-      pageSegments, // 페이지별 세그먼트 정보 추가
-      targetLanguage = "ko",
-      needPinyin = true,
-      processingMode, // 클라이언트 처리 모드 (differential update 감지용)
-    } = req.body;
-
     // Differential Update 모드 감지
-    const useDifferentialUpdate = processingMode === 'TextProcessingMode.segment';
-    
+    const useDifferentialUpdate = processingMode === "TextProcessingMode.segment";
+
     console.log(`🌊 [스트리밍] 번역 시작: ${textSegments.length}개 세그먼트`);
     console.log(`🔄 [Processing Mode] ${processingMode}`);
     console.log(`📦 [Differential Update] ${useDifferentialUpdate ? '활성화' : '비활성화'}`);
@@ -77,14 +94,30 @@ exports.translateSegmentsStream = onRequest({
 
       let totalChunks = 0;
       for (const pageInfo of pageSegments) {
-        totalChunks += Math.ceil(pageInfo.segments.length / 3);
+        const segs = pageInfo.segments || [];
+        totalChunks += Math.max(1, Math.ceil(segs.length / 3));
       }
 
       let chunkIndex = 0;
 
       for (const pageInfo of pageSegments) {
         const CHUNK_SIZE = 3;
-        const pageChunks = splitIntoChunks(pageInfo.segments, CHUNK_SIZE);
+        const pageChunks = splitIntoChunks(pageInfo.segments || [], CHUNK_SIZE);
+
+        if (pageChunks.length === 0) {
+          const streamData = {
+            chunkIndex,
+            totalChunks,
+            pageId: pageInfo.pageId,
+            units: [],
+            mode: "full",
+            isComplete: chunkIndex === totalChunks - 1,
+          };
+          res.write(`data: ${JSON.stringify(streamData)}\n\n`);
+          console.log(`✅ [스트리밍] 페이지 ${pageInfo.pageId} (빈 세그먼트) 전송 완료`);
+          chunkIndex++;
+          continue;
+        }
 
         for (let i = 0; i < pageChunks.length; i++) {
           try {
@@ -125,7 +158,7 @@ exports.translateSegmentsStream = onRequest({
             console.log(`✅ [스트리밍] 페이지 ${pageInfo.pageId} 청크 ${chunkIndex + 1} 전송 완료`);
             chunkIndex++;
           } catch (error) {
-            console.error(`❌ [스트리밍] 페이지 ${pageInfo.pageId} 청크 ${i} 실패:`, error);
+            console.error(`❌ [스트리밍] 페이지 ${pageInfo.pageId} 청크 ${i} 실패: ${error?.message ?? String(error)}`);
 
             const errorData = {
               chunkIndex: chunkIndex,
@@ -192,7 +225,7 @@ exports.translateSegmentsStream = onRequest({
 
           console.log(`✅ [스트리밍] 청크 ${i + 1} 전송 완료`);
         } catch (error) {
-          console.error(`❌ [스트리밍] 청크 ${i} 실패:`, error);
+          console.error(`❌ [스트리밍] 청크 ${i} 실패: ${error?.message ?? String(error)}`);
 
           const errorData = {
             chunkIndex: i,
@@ -207,8 +240,13 @@ exports.translateSegmentsStream = onRequest({
     res.end();
     console.log(`🏁 [스트리밍] 모든 청크 전송 완료`);
   } catch (error) {
-    console.error("❌ [스트리밍] 전체 오류:", error);
-    res.status(500).json({error: error.message});
+    console.error(`❌ [스트리밍] 전체 오류: ${error?.message ?? String(error)}`);
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    } else {
+      res.write(`data: ${JSON.stringify({ isError: true, error: error.message })}\n\n`);
+      res.end();
+    }
   }
 });
 
@@ -221,28 +259,46 @@ exports.translateSegments = onCall({
   region: "asia-southeast1", // 싱가포르 리전으로 변경
   secrets: ["OPENAI_API_KEY"], // secret 사용 선언
 }, async (request) => {
-  console.log(`🔥 [DEBUG] translateSegments 함수 시작!`);
-  console.log(`🔥 [DEBUG] 사용자: ${request.auth ? request.auth.uid : "N/A"}`);
+  console.log("🔥 [DEBUG] translateSegments 함수 시작!");
 
   if (!request.auth) {
+    console.log("🔥 [DEBUG] 인증 없음 - 로그인 필요");
     throw new HttpsError("unauthenticated", "로그인 필요");
   }
+  console.log(`🔥 [DEBUG] 사용자: ${request.auth.uid}`);
 
-  const {
-    textSegments,
-    sourceLanguage = "zh-CN",
-    targetLanguage = "ko",
-    needPinyin = true,
-    mode = "segment",
-    pageId,
-    noteId,
-  } = request.data;
+  const data = request.data && typeof request.data === "object" ? request.data : {};
+  const textSegments = Array.isArray(data.textSegments) ? data.textSegments : [];
+  const sourceLanguage = data.sourceLanguage ?? "zh-CN";
+  const targetLanguage = data.targetLanguage ?? "ko";
+  const needPinyin = data.needPinyin !== false;
+  const mode = data.mode ?? "segment";
+  const pageId = data.pageId;
+  const noteId = data.noteId;
 
   console.log(
-      `🤖 Translating ${textSegments.length} segments ` +
-      `for user: ${request.auth.uid} (모드: ${mode})`,
+      "📥 [클라이언트 데이터 수신] textSegments: %d개, sourceLanguage: %s, targetLanguage: %s, mode: %s, needPinyin: %s, pageId: %s, noteId: %s",
+      textSegments.length,
+      sourceLanguage,
+      targetLanguage,
+      mode,
+      needPinyin,
+      pageId ?? "(없음)",
+      noteId ?? "(없음)",
+  );
+  console.log(
+      `🤖 Translating ${textSegments.length} segments for user: ${request.auth.uid} (모드: ${mode})`,
   );
   console.log(`📄 Page: ${pageId}, Note: ${noteId}`);
+
+  if (textSegments.length === 0) {
+    console.log("🔥 [DEBUG] textSegments 비어 있음 - 빈 결과 반환");
+    return {
+      success: true,
+      translation: { units: [], fullOriginalText: "", fullTranslatedText: "", mode },
+      statistics: { segmentCount: 0, totalCharacters: 0, processingTime: 0 },
+    };
+  }
 
   try {
     const startTime = Date.now();
@@ -273,7 +329,7 @@ exports.translateSegments = onCall({
       },
     };
   } catch (error) {
-    console.error("❌ Translation error:", error);
+    console.error(`❌ Translation error: ${error?.message ?? String(error)}`);
     throw new HttpsError("internal", `번역 실패: ${error.message}`);
   }
 });
@@ -549,7 +605,7 @@ REQUIREMENTS:
         }
       }
     } catch (parseError) {
-      console.error("❌ JSON 파싱 최종 실패:", parseError);
+      console.error(`❌ JSON 파싱 최종 실패: ${parseError?.message ?? String(parseError)}`);
       console.error("❌ 원본 내용:", content);
       console.error("❌ 정리된 내용:", cleanContent);
 
@@ -557,7 +613,7 @@ REQUIREMENTS:
       return createFallbackResult(segments, "[파싱 실패]", targetLanguage, mode);
     }
   } catch (apiError) {
-    console.error("❌ OpenAI API 호출 실패:", apiError);
+    console.error(`❌ OpenAI API 호출 실패: ${apiError?.message ?? String(apiError)}`);
 
     // API 호출 실패시 폴백 처리
     return createFallbackResult(segments, "[API 호출 실패]", targetLanguage, mode);
@@ -607,7 +663,7 @@ async function optimizedBatchTranslateSegments(
       const chunkResult = await translateChunk(chunk, targetLanguage, needPinyin, mode);
       return {success: true, result: chunkResult, index};
     } catch (error) {
-      console.error(`❌ Chunk ${index + 1} failed:`, error);
+      console.error(`❌ Chunk ${index + 1} failed: ${error?.message ?? String(error)}`);
       return {
         success: false,
         error,
@@ -779,4 +835,3 @@ function smartSplitForParagraphMode(fullText) {
   
   return finalChunks;
 }
-
