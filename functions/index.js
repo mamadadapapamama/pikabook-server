@@ -92,33 +92,37 @@ exports.translateSegmentsStreamV2 = onRequest({
       generationConfig: GENERATION_CONFIG,
     });
 
-    let chunkIndex = 0;
     const totalChunks = pageSegments.length;
 
-    for (const pageInfo of pageSegments) {
+    // 모든 페이지를 병렬로 Gemini 처리 (최대 동시 실행)
+    const processPage = async (pageInfo, index) => {
       try {
-        if (!pageInfo.imageUrl) {
-          throw new Error("imageUrl이 없습니다.");
+        let base64, contentType;
+
+        if (pageInfo.imageBase64) {
+          base64 = pageInfo.imageBase64;
+          contentType = pageInfo.imageMimeType || "image/webp";
+          console.log(`⚡ [Vision] 페이지 처리 시작 (Base64 직접 수신): ${pageInfo.pageId}`);
+        } else if (pageInfo.imageUrl) {
+          console.log(`🖼️ [Vision] 페이지 처리 시작 (URL 다운로드): ${pageInfo.pageId}`);
+          ({ base64, contentType } = await fetchImageAsBase64(pageInfo.imageUrl));
+        } else {
+          throw new Error("imageUrl 또는 imageBase64가 없습니다.");
         }
 
-        console.log(`🖼️ [Vision] 페이지 처리 시작: ${pageInfo.pageId}`);
-        const { base64, contentType } = await fetchImageAsBase64(pageInfo.imageUrl);
-
         const imagePart = {
-          inlineData: {
-            data: base64,
-            mimeType: contentType,
-          },
+          inlineData: { data: base64, mimeType: contentType },
         };
 
-        const result = await model.generateContent([imagePart]);
-        const response = await result.response;
-        const content = response.text();
+        const streamResult = await model.generateContentStream([imagePart]);
+        let content = "";
+        for await (const chunk of streamResult.stream) {
+          content += chunk.text();
+        }
 
         const parsed = JSON.parse(content);
         const segments = Array.isArray(parsed?.segments) ? parsed.segments : [];
 
-        // 클라이언트 규격에 맞게 변환 (original, pinyin, translation, type)
         const units = segments.map((segment) => ({
           original: segment.original || "",
           pinyin: segment.pinyin || "",
@@ -126,32 +130,38 @@ exports.translateSegmentsStreamV2 = onRequest({
           type: segment.type || "sentence",
         }));
 
-        const streamData = {
-          chunkIndex,
+        return {
+          chunkIndex: index,
           totalChunks,
           pageId: pageInfo.pageId,
           units,
-          isComplete: chunkIndex === totalChunks - 1,
+          isComplete: index === totalChunks - 1,
         };
-
-        res.write(`data: ${JSON.stringify(streamData)}\n\n`);
-        console.log(`✅ [스트리밍] 페이지 ${pageInfo.pageId} 전송 완료 (${units.length} 유닛)`);
-        chunkIndex++;
       } catch (error) {
         console.error(`❌ [스트리밍] 페이지 ${pageInfo.pageId} 실패:`, error);
-        const errorData = {
-          chunkIndex,
+        return {
+          chunkIndex: index,
           pageId: pageInfo.pageId,
           error: error.message,
           isError: true,
         };
-        res.write(`data: ${JSON.stringify(errorData)}\n\n`);
-        chunkIndex++;
+      }
+    };
+
+    const results = await Promise.all(
+      pageSegments.map((pageInfo, index) => processPage(pageInfo, index))
+    );
+
+    // 순서대로 클라이언트에 전송
+    for (const streamData of results) {
+      res.write(`data: ${JSON.stringify(streamData)}\n\n`);
+      if (!streamData.isError) {
+        console.log(`✅ [스트리밍] 페이지 ${streamData.pageId} 전송 완료 (${streamData.units.length} 유닛)`);
       }
     }
 
     res.end();
-    console.log(`🏁 [스트리밍] 모든 청크 전송 완료`);
+    console.log(`🏁 [스트리밍] 모든 청크 전송 완료 (병렬 처리)`);
   } catch (error) {
     console.error("❌ [스트리밍] 전체 오류:", error);
     res.status(500).json({error: error.message});
@@ -225,9 +235,11 @@ async function translateChunk(segments, targetLanguage, needPinyin, mode = "segm
 
     const userPrompt = `Process the following Chinese text segments:\n${JSON.stringify(segments, null, 2)}`;
 
-    const result = await model.generateContent(userPrompt);
-    const response = await result.response;
-    const content = response.text();
+    const streamResult = await model.generateContentStream(userPrompt);
+    let content = "";
+    for await (const chunk of streamResult.stream) {
+      content += chunk.text();
+    }
 
     const parsed = JSON.parse(content);
     const batchResults = parsed.segments || [];
