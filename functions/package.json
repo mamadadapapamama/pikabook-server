@@ -4,6 +4,7 @@
   "description": "Cloud Functions for Firebase - Gemini Version",
   "main": "index.js",
   "dependencies": {
+    "@google-cloud/text-to-speech": "^6.4.1",
     "@google/generative-ai": "^0.24.1",
     "firebase-admin": "^12.6.0",
     "firebase-functions": "^6.0.1",

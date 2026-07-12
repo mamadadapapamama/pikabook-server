@@ -4,10 +4,38 @@
 // ==========================================
 const {onRequest, onCall, HttpsError} = require("firebase-functions/v2/https");
 const {initializeApp} = require("firebase-admin/app");
+const {getAuth} = require("firebase-admin/auth");
+const crypto = require("crypto");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const textToSpeech = require("@google-cloud/text-to-speech");
 const { getSystemInstruction, GENERATION_CONFIG } = require("./prompts");
 
 initializeApp();
+
+// ── TTS (Google Cloud Text-to-Speech, Chirp3-HD) ─────────────────
+// 서비스 계정(ADC)으로 인증 → API 키 불필요. 앱에 키를 넣지 않는다.
+const TTS_LANGUAGE = "cmn-CN";
+const TTS_VOICE = "cmn-CN-Chirp3-HD-Achernar"; // 기본 음성. 변경은 이 상수만.
+let _ttsClient;
+function getTtsClient() {
+  if (!_ttsClient) _ttsClient = new textToSpeech.TextToSpeechClient();
+  return _ttsClient;
+}
+
+/**
+ * onRequest 함수용 Firebase ID 토큰 검증.
+ * 유효하면 디코딩된 토큰을, 아니면 null을 반환한다.
+ */
+async function verifyRequestAuth(req) {
+  const header = req.get("authorization") || "";
+  const match = header.match(/^Bearer (.+)$/i);
+  if (!match) return null;
+  try {
+    return await getAuth().verifyIdToken(match[1]);
+  } catch (err) {
+    return null;
+  }
+}
 
 /**
  * Gemini 클라이언트 생성 함수
@@ -52,6 +80,13 @@ exports.translateSegmentsStreamV2 = onRequest({
 
   if (req.method === "OPTIONS") {
     res.status(200).end();
+    return;
+  }
+
+  // 인증 검증: 로그인한 사용자만 (익명 남용/비용 폭탄 차단)
+  const decodedToken = await verifyRequestAuth(req);
+  if (!decodedToken) {
+    res.status(401).json({error: "unauthenticated"});
     return;
   }
 
@@ -214,6 +249,94 @@ exports.translateSegmentsV2 = onCall({
     console.error("❌ Translation error:", error);
     throw new HttpsError("internal", `번역 실패: ${error.message}`);
   }
+});
+
+// ===========================================
+// TTS 합성 (Google Chirp3-HD) — text + speed → base64 mp3
+// 클라이언트는 이 함수를 호출하고, 사용량 집계는 별도(checkUsageQuota).
+// ===========================================
+exports.ttsSynthesize = onCall({
+  timeoutSeconds: 60,
+  memory: "256MiB",
+  region: "asia-southeast1",
+}, async (request) => {
+  if (!request.auth) {
+    throw new HttpsError("unauthenticated", "로그인 필요");
+  }
+
+  const text = String(request.data?.text || "").trim();
+  if (!text) {
+    throw new HttpsError("invalid-argument", "text가 필요합니다.");
+  }
+  if (text.length > 2000) {
+    throw new HttpsError("invalid-argument", "text가 너무 깁니다(최대 2000자).");
+  }
+
+  // 0.25~4.0 범위. 앱: 일반 0.9 / 느린 0.7.
+  const speed = Math.min(4.0, Math.max(0.25, Number(request.data?.speed) || 0.9));
+  const voice = String(request.data?.voice || TTS_VOICE);
+
+  try {
+    const [response] = await getTtsClient().synthesizeSpeech({
+      input: { text },
+      voice: { languageCode: TTS_LANGUAGE, name: voice },
+      audioConfig: { audioEncoding: "MP3", speakingRate: speed },
+    });
+    const audioBase64 = Buffer.from(response.audioContent).toString("base64");
+    return { audioBase64 };
+  } catch (error) {
+    console.error("❌ TTS synthesis error:", error);
+    throw new HttpsError("internal", `TTS 합성 실패: ${error.message}`);
+  }
+});
+
+// ===========================================
+// iFLYTEK 발음평가(ISE) 인증 — 서명된 WebSocket URL + appId 발급
+// 비밀값(apiKey/apiSecret)은 서버에만. 앱은 받은 URL로 iFLYTEK에 직접 스트리밍.
+// ===========================================
+const IFLYTEK_HOST = "ise-api-sg.xf-yun.com";
+const IFLYTEK_PATH = "/v2/ise";
+
+exports.iflytekIseAuth = onCall({
+  timeoutSeconds: 30,
+  memory: "256MiB",
+  region: "asia-southeast1",
+  secrets: ["IFLYTEK_APP_ID", "IFLYTEK_API_KEY", "IFLYTEK_API_SECRET"],
+}, async (request) => {
+  if (!request.auth) {
+    throw new HttpsError("unauthenticated", "로그인 필요");
+  }
+
+  const appId = process.env.IFLYTEK_APP_ID;
+  const apiKey = process.env.IFLYTEK_API_KEY;
+  const apiSecret = process.env.IFLYTEK_API_SECRET;
+  if (!appId || !apiKey || !apiSecret) {
+    throw new HttpsError("failed-precondition", "iFLYTEK 자격증명이 설정되지 않았습니다.");
+  }
+
+  // RFC1123 GMT (Dart HttpDate.format와 동일 포맷)
+  const date = new Date().toUTCString();
+  const signatureOrigin =
+    `host: ${IFLYTEK_HOST}\n` +
+    `date: ${date}\n` +
+    `GET ${IFLYTEK_PATH} HTTP/1.1`;
+  const signature = crypto
+    .createHmac("sha256", apiSecret)
+    .update(signatureOrigin)
+    .digest("base64");
+  const authorizationOrigin =
+    `api_key="${apiKey}", algorithm="hmac-sha256", ` +
+    `headers="host date request-line", signature="${signature}"`;
+  const authorization = Buffer.from(authorizationOrigin).toString("base64");
+
+  const params = new URLSearchParams({
+    authorization,
+    date,
+    host: IFLYTEK_HOST,
+  });
+  const wsUrl = `wss://${IFLYTEK_HOST}${IFLYTEK_PATH}?${params.toString()}`;
+
+  return { wsUrl, appId };
 });
 
 /**
